@@ -1,0 +1,112 @@
+resources:
+- name: nuxeo-release
+  type: git
+  source:
+    uri: git@github.com:my-user/nuxeo-release.git
+    branch: master
+    private_key: {{nuxeo-release-github-private-key}}
+- name: version
+  type: semver
+  source:
+    bucket: nuxeo-release-pipeline-artifacts
+    key: current-version
+    access_key_id: {{s3-access-key-id}}
+    secret_access_key: {{s3-secret-access-key}}
+    initial_version: 1.0.0
+- name: aws-amis
+  type: git
+  source:
+    uri: 
+    branch: master
+- name: nuxeo-ami-release-rc
+  type: s3
+  source:
+    bucket: nuxeo-release-pipeline-artifacts
+    regexp: nuxeo-release-(.*).tgz
+    access_key_id: {{s3-access-key-id}}
+    secret_access_key: {{s3-secret-access-key}}
+- name: nuxeo-release-final
+  type: s3
+  source:
+    bucket: nuxeo-release
+    regexp: nuxeo-release-(.*).tgz
+    access_key_id: {{s3-access-key-id}}
+    secret_access_key: {{s3-secret-access-key}}
+- name: ansible
+  type: s3
+  source:
+    bucket: nuxeo-release
+    regexp: nuxeo-release-(.*).tgz
+    access_key_id: {{s3-access-key-id}}
+    secret_access_key: {{s3-secret-access-key}}
+
+jobs:
+- name: smoke-test
+  plan:
+  - get: nuxeo-release
+    trigger: true
+  - task: smoke-test
+    file: nuxeo-release/ci/smoke-test.yml
+- name: build-aws-ami
+  serial_groups: [version]
+  plan:
+  - get: ansible
+  - get: nuxeo-release
+    passed: [smoke-test]
+    trigger: true
+  - get: version
+    params: {pre: rc}
+  - task: build-artifact
+    file: nuxeo-release/ci/build-artifact.yml
+  - put: nuxeo-ami-release-rc
+    params: {file: built-artifact/nuxeo-release-*.tgz}
+  - put: version
+    params: {file: version/number}
+  - put: aws-amis
+    params: {repository: some-other-repo}
+- name: aws-integration-test
+  serial: true
+  plan:
+  - get: nuxeo-ami-release-rc
+    trigger: true
+    passed: [build-aws-ami]
+  - get: nuxeo-release
+    passed: [build-aws-ami]
+  - task: aws-integration-test
+    file: nuxeo-release/ci/aws-integration-test.yml
+    params:
+      API_ENDPOINT: {{aws-integration-test-api-endpoint}}
+      ACCESS_KEY: {{aws-integration-test-access-key}}
+- name: shipit
+  serial_groups: [version]
+  plan:
+  - get: nuxeo-ami-release-rc
+    passed: [aws-integration-test]
+  - get: nuxeo-release
+    passed: [aws-integration-test]
+  - get: version
+    params: {bump: final}
+  - task: promote-to-final
+    file: nuxeo-release/ci/promote-to-final.yml
+  - put: nuxeo-release-final
+    params: {file: built-product/nuxeo-release-*.tgz}
+  - put: version
+    params: {file: version/number}
+- name: major
+  serial_groups: [version]
+  plan:
+  - put: version
+    params: {bump: major, pre: rc}
+- name: minor
+  serial_groups: [version]
+  plan:
+  - put: version
+    params: {bump: minor, pre: rc}
+- name: hotfix
+  serial_groups: [version]
+  plan:
+  - get: version
+    passed: [shipit]
+    trigger: true
+  - put: version
+    params: {bump: hotfix, pre: rc}
